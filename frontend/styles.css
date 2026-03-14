@@ -363,6 +363,48 @@ main {
 
 .book-btn:hover { opacity: .85; }
 
+/* ── Fare cards ───────────────────────────────────────────────── */
+.fare-card {
+  grid-template-columns: 1fr auto !important;
+  gap: 1rem;
+  flex-wrap: wrap;
+  display: flex !important;
+  align-items: center;
+}
+
+.fare-carrier {
+  display: inline-block;
+  border: 1.5px solid;
+  border-radius: 6px;
+  padding: .25rem .7rem;
+  font-size: .8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
+
+.fare-route {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  font-size: .95rem;
+}
+
+.fare-station { font-weight: 600; }
+.fare-arrow { color: var(--gray-400); }
+
+.fare-class-badge {
+  font-size: .75rem;
+  background: var(--gray-100);
+  color: var(--gray-700);
+  border-radius: 4px;
+  padding: .1rem .45rem;
+  font-weight: 600;
+}
+
 /* ── Alert CTA ────────────────────────────────────────────────── */
 .alert-cta {
   margin-top: 1.5rem;

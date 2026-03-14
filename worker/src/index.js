@@ -1,9 +1,13 @@
 /**
  * TrainPascher — SNCF Ticket Hunter
- * Cloudflare Worker: API proxy, caching via KV, alerts via Turso
+ * Cloudflare Worker: uses data.sncf.com Opendatasoft API (free)
+ * - Autocomplete: gares-de-voyageurs dataset
+ * - Fares: tarifs-tgv-inoui-ouigo dataset
  */
 
 import { createClient } from "@libsql/client/web";
+
+const ODS = "https://data.sncf.com/api/explore/v2.1/catalog/datasets";
 
 // ─── CORS ──────────────────────────────────────────────────────────────────
 
@@ -19,194 +23,141 @@ function corsHeaders(origin) {
 function json(data, status = 200, origin) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(origin),
-    },
+    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
-// ─── SNCF Navitia helpers ──────────────────────────────────────────────────
+// ─── data.sncf.com helpers ─────────────────────────────────────────────────
 
-function navitiaHeaders(apiKey) {
-  return {
-    Authorization: `Basic ${btoa(apiKey + ":")}`,
-    Accept: "application/json",
-  };
+function odsHeaders(apiKey) {
+  return { Authorization: `Apikey ${apiKey}`, Accept: "application/json" };
 }
-
-const NAVITIA = "https://api.sncf.com/v1/coverage/sncf";
 
 async function searchPlaces(query, apiKey) {
-  const url = `${NAVITIA}/places?q=${encodeURIComponent(query)}&type[]=stop_area&count=8`;
-  const res = await fetch(url, { headers: navitiaHeaders(apiKey) });
-  if (!res.ok) throw new Error(`Navitia places error: ${res.status}`);
-  const data = await res.json();
-  return (data.places || [])
-    .filter((p) => p.embedded_type === "stop_area")
-    .map((p) => ({
-      id: p.stop_area.id,
-      name: p.stop_area.name,
-      label: p.name,
-    }));
-}
-
-async function searchJourneys(fromId, toId, datetime, apiKey) {
+  // Escape double quotes to avoid breaking the ODS query
+  const safe = query.replace(/"/g, "").trim();
   const url =
-    `${NAVITIA}/journeys` +
-    `?from=${encodeURIComponent(fromId)}` +
-    `&to=${encodeURIComponent(toId)}` +
-    `&datetime=${encodeURIComponent(datetime)}` +
-    `&count=8` +
-    `&data_freshness=realtime`;
+    `${ODS}/gares-de-voyageurs/records` +
+    `?limit=8` +
+    `&select=nom,libellecourt,codes_uic` +
+    `&where=search(nom,"${encodeURIComponent(safe)}")`;
 
-  const res = await fetch(url, { headers: navitiaHeaders(apiKey) });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Navitia journeys error ${res.status}: ${errText}`);
-  }
+  const res = await fetch(url, { headers: odsHeaders(apiKey) });
+  if (!res.ok) throw new Error(`Stations API error: ${res.status}`);
   const data = await res.json();
-  return parseJourneys(data);
+
+  return (data.results || []).map((g) => ({
+    id: g.codes_uic || g.nom,
+    name: g.nom,
+    label: g.libellecourt ? `${g.nom} (${g.libellecourt})` : g.nom,
+  }));
 }
 
-function parseJourneys(data) {
-  const journeys = data.journeys || [];
-  return journeys
-    .filter((j) => j.status !== "no_solution")
-    .map((j) => {
-      // Extract fare information
-      const fare = j.fare || {};
-      const found = fare.found === true;
-      const totalPrice = fare.total
-        ? parseFloat(fare.total.value) / 100
-        : null;
-      const currency = fare.total?.currency || "EUR";
+async function searchFares(fromName, toName, apiKey) {
+  // ODS search() is case-insensitive full-text, so we just pass the names
+  const safeFrom = fromName.replace(/"/g, "").trim();
+  const safeTo = toName.replace(/"/g, "").trim();
 
-      // Extract sections (train legs)
-      const sections = (j.sections || [])
-        .filter((s) => s.type === "public_transport")
-        .map((s) => ({
-          from: s.from?.name || "",
-          to: s.to?.name || "",
-          departure: s.departure_date_time,
-          arrival: s.arrival_date_time,
-          line: s.display_informations?.label || "",
-          direction: s.display_informations?.direction || "",
-          network: s.display_informations?.network || "",
-          physical_mode: s.display_informations?.physical_mode || "",
-          headsign: s.display_informations?.headsign || "",
-        }));
+  const url =
+    `${ODS}/tarifs-tgv-inoui-ouigo/records` +
+    `?limit=100` +
+    `&select=transporteur,gare_origine,gare_destination,classe,profil_tarifaire,prix_minimum,prix_maximum` +
+    `&where=search(gare_origine,"${encodeURIComponent(safeFrom)}")` +
+    `%20AND%20search(gare_destination,"${encodeURIComponent(safeTo)}")`;
 
-      const departureTime = j.departure_date_time;
-      const arrivalTime = j.arrival_date_time;
-      const durationMin = Math.round(j.duration / 60);
-      const transfers = j.nb_transfers || 0;
+  const res = await fetch(url, { headers: odsHeaders(apiKey) });
+  if (!res.ok) throw new Error(`Fares API error: ${res.status}`);
+  const data = await res.json();
+  return parseFares(data.results || []);
+}
 
-      return {
-        id: j.id || crypto.randomUUID(),
-        departure: departureTime,
-        arrival: arrivalTime,
-        duration_min: durationMin,
-        transfers,
-        fare_found: found,
-        price: totalPrice,
-        currency,
-        sections,
-        status: j.status || "ok",
+function parseFares(records) {
+  // Group by carrier + class, collect all fare profiles
+  const grouped = {};
+
+  for (const r of records) {
+    const key = `${r.transporteur}|||${r.classe}|||${r.gare_origine}|||${r.gare_destination}`;
+    if (!grouped[key]) {
+      grouped[key] = {
+        carrier: r.transporteur,
+        from: r.gare_origine,
+        to: r.gare_destination,
+        class: r.classe === "1" ? "1ère classe" : "2ème classe",
+        min_price: r.prix_minimum,
+        max_price: r.prix_maximum,
+        fare_profiles: [],
       };
-    })
-    .sort((a, b) => {
-      // Sort by price (nulls last), then by departure
-      if (a.price !== null && b.price !== null) return a.price - b.price;
-      if (a.price !== null) return -1;
-      if (b.price !== null) return 1;
-      return a.departure.localeCompare(b.departure);
+    } else {
+      grouped[key].min_price = Math.min(grouped[key].min_price, r.prix_minimum);
+      grouped[key].max_price = Math.max(grouped[key].max_price, r.prix_maximum);
+    }
+    grouped[key].fare_profiles.push({
+      name: r.profil_tarifaire,
+      min: r.prix_minimum,
+      max: r.prix_maximum,
     });
+  }
+
+  return Object.values(grouped).sort((a, b) => a.min_price - b.min_price);
 }
 
 // ─── Turso helpers ──────────────────────────────────────────────────────────
 
 function getDb(env) {
-  return createClient({
-    url: env.TURSO_URL,
-    authToken: env.TURSO_AUTH_TOKEN,
-  });
+  return createClient({ url: env.TURSO_URL, authToken: env.TURSO_AUTH_TOKEN });
 }
 
 // ─── Route handlers ─────────────────────────────────────────────────────────
 
 async function handleAutocomplete(req, env) {
   const url = new URL(req.url);
-  const q = url.searchParams.get("q") || "";
+  const q = (url.searchParams.get("q") || "").trim();
   if (q.length < 2) return json([]);
 
-  // Cache autocomplete in KV for 1 hour
-  const cacheKey = `autocomplete:${q.toLowerCase()}`;
+  const cacheKey = `ac:${q.toLowerCase()}`;
   const cached = await env.CACHE.get(cacheKey, "json");
   if (cached) return json(cached);
 
   const places = await searchPlaces(q, env.SNCF_API_KEY);
-  await env.CACHE.put(cacheKey, JSON.stringify(places), {
-    expirationTtl: 3600,
-  });
+  await env.CACHE.put(cacheKey, JSON.stringify(places), { expirationTtl: 86400 }); // 24h
   return json(places);
 }
 
 async function handleSearch(req, env, origin) {
   const body = await req.json();
-  const { from_id, to_id, from_name, to_name, date } = body;
+  const { from_name, to_name } = body;
 
-  if (!from_id || !to_id || !date) {
-    return json({ error: "Missing from_id, to_id, or date" }, 400, origin);
+  if (!from_name || !to_name) {
+    return json({ error: "Missing from_name or to_name" }, 400, origin);
   }
 
-  // Normalize datetime: if only date given, use 06:00
-  const datetime = date.includes("T") ? date : `${date}T060000`;
-
-  // Cache search results in KV for 15 min
-  const cacheKey = `journeys:${from_id}:${to_id}:${datetime}`;
+  const cacheKey = `fares:${from_name.toLowerCase()}:${to_name.toLowerCase()}`;
   const cached = await env.CACHE.get(cacheKey, "json");
-  if (cached) {
-    return json({ journeys: cached, cached: true }, 200, origin);
-  }
+  if (cached) return json({ fares: cached, cached: true }, 200, origin);
 
-  const journeys = await searchJourneys(from_id, to_id, datetime, env.SNCF_API_KEY);
+  const fares = await searchFares(from_name, to_name, env.SNCF_API_KEY);
 
-  await env.CACHE.put(cacheKey, JSON.stringify(journeys), {
-    expirationTtl: 900, // 15 min
-  });
+  await env.CACHE.put(cacheKey, JSON.stringify(fares), { expirationTtl: 3600 }); // 1h
 
   // Log search to Turso (non-blocking)
-  const minPrice = journeys.find((j) => j.price !== null)?.price ?? null;
   try {
+    const minPrice = fares[0]?.min_price ?? null;
     const db = getDb(env);
     await db.execute({
       sql: `INSERT OR IGNORE INTO search_log (id, from_station, to_station, travel_date, min_price, searched_at)
             VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [
-        crypto.randomUUID(),
-        from_name || from_id,
-        to_name || to_id,
-        date,
-        minPrice,
-        Date.now(),
-      ],
+      args: [crypto.randomUUID(), from_name, to_name, new Date().toISOString().slice(0, 10), minPrice, Date.now()],
     });
-  } catch (_) {
-    // Don't fail the request if Turso is down
-  }
+  } catch (_) {}
 
-  return json({ journeys, cached: false }, 200, origin);
+  return json({ fares, cached: false }, 200, origin);
 }
 
 async function handleAlerts(req, env, origin) {
-  const method = req.method;
-
-  if (method === "GET") {
+  if (req.method === "GET") {
     const url = new URL(req.url);
     const userId = url.searchParams.get("user_id");
     if (!userId) return json({ error: "Missing user_id" }, 400, origin);
-
     const db = getDb(env);
     const result = await db.execute({
       sql: `SELECT * FROM price_alerts WHERE user_id = ? AND active = 1 ORDER BY created_at DESC`,
@@ -215,30 +166,27 @@ async function handleAlerts(req, env, origin) {
     return json({ alerts: result.rows }, 200, origin);
   }
 
-  if (method === "POST") {
+  if (req.method === "POST") {
     const body = await req.json();
-    const { user_id, from_station, from_id, to_station, to_id, travel_date, max_price, email } = body;
-
-    if (!user_id || !from_id || !to_id || !travel_date) {
+    const { user_id, from_station, from_id, to_station, to_id, max_price, email } = body;
+    if (!user_id || !from_station || !to_station) {
       return json({ error: "Missing required fields" }, 400, origin);
     }
-
     const db = getDb(env);
     const id = crypto.randomUUID();
     await db.execute({
       sql: `INSERT INTO price_alerts (id, user_id, from_station, from_id, to_station, to_id, travel_date, max_price, email, created_at, active)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      args: [id, user_id, from_station, from_id, to_station, to_id, travel_date, max_price || null, email || null, Date.now()],
+      args: [id, user_id, from_station, from_id || "", to_station, to_id || "", "", max_price || null, email || null, Date.now()],
     });
     return json({ success: true, id }, 201, origin);
   }
 
-  if (method === "DELETE") {
+  if (req.method === "DELETE") {
     const url = new URL(req.url);
     const id = url.searchParams.get("id");
     const userId = url.searchParams.get("user_id");
     if (!id || !userId) return json({ error: "Missing id or user_id" }, 400, origin);
-
     const db = getDb(env);
     await db.execute({
       sql: `UPDATE price_alerts SET active = 0 WHERE id = ? AND user_id = ?`,
@@ -258,7 +206,7 @@ async function handleTrending(env, origin) {
   try {
     const db = getDb(env);
     const result = await db.execute(`
-      SELECT from_station, to_station, COUNT(*) as searches, AVG(min_price) as avg_price
+      SELECT from_station, to_station, COUNT(*) as searches, MIN(min_price) as best_price
       FROM search_log
       WHERE searched_at > ${Date.now() - 7 * 24 * 60 * 60 * 1000}
       GROUP BY from_station, to_station
@@ -273,36 +221,29 @@ async function handleTrending(env, origin) {
   }
 }
 
-// ─── Main fetch handler ──────────────────────────────────────────────────────
+// ─── Main ────────────────────────────────────────────────────────────────────
 
 export default {
   async fetch(request, env) {
     const origin = request.headers.get("Origin") || "*";
 
-    // Preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
-    const url = new URL(request.url);
-    const path = url.pathname;
+    const path = new URL(request.url).pathname;
 
     try {
-      if (path === "/api/autocomplete" && request.method === "GET") {
+      if (path === "/api/autocomplete" && request.method === "GET")
         return await handleAutocomplete(request, env);
-      }
-      if (path === "/api/search" && request.method === "POST") {
+      if (path === "/api/search" && request.method === "POST")
         return await handleSearch(request, env, origin);
-      }
-      if (path === "/api/alerts") {
+      if (path === "/api/alerts")
         return await handleAlerts(request, env, origin);
-      }
-      if (path === "/api/trending" && request.method === "GET") {
+      if (path === "/api/trending" && request.method === "GET")
         return await handleTrending(env, origin);
-      }
-      if (path === "/api/health") {
+      if (path === "/api/health")
         return json({ status: "ok", ts: Date.now() }, 200, origin);
-      }
 
       return json({ error: "Not found" }, 404, origin);
     } catch (err) {

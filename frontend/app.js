@@ -104,7 +104,6 @@ document.addEventListener("click", (e) => {
 
 // ── Search ────────────────────────────────────────────────────────────────────
 async function doSearch() {
-  const dateInput = document.getElementById("input-date").value;
   const errorEl = document.getElementById("error-section");
   const resultsEl = document.getElementById("results-section");
 
@@ -119,10 +118,6 @@ async function doSearch() {
     showError("Veuillez sélectionner une gare d'arrivée dans la liste.");
     return;
   }
-  if (!dateInput) {
-    showError("Veuillez choisir une date de voyage.");
-    return;
-  }
 
   setSearchLoading(true);
 
@@ -131,11 +126,8 @@ async function doSearch() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        from_id: selectedFrom.id,
-        to_id: selectedTo.id,
         from_name: selectedFrom.name,
         to_name: selectedTo.name,
-        date: dateInput,
       }),
     });
 
@@ -146,13 +138,8 @@ async function doSearch() {
       return;
     }
 
-    lastSearch = {
-      from: selectedFrom,
-      to: selectedTo,
-      date: dateInput,
-    };
-
-    renderResults(data.journeys, data.cached);
+    lastSearch = { from: selectedFrom, to: selectedTo };
+    renderResults(data.fares, data.cached);
   } catch (err) {
     showError("Impossible de contacter le serveur. Vérifiez votre connexion.");
   } finally {
@@ -175,28 +162,28 @@ function showError(msg) {
   el.classList.remove("hidden");
 }
 
-function formatTime(dt) {
-  // dt format: "20260415T103000" → "10:30"
-  if (!dt || dt.length < 13) return "--:--";
-  return dt.substring(9, 11) + ":" + dt.substring(11, 13);
+const CARRIER_COLORS = {
+  "OUIGO": { bg: "#fce7f3", text: "#be185d", border: "#fbcfe8" },
+  "TGV INOUI": { bg: "#e0f2fe", text: "#0369a1", border: "#bae6fd" },
+  "INTERCITES": { bg: "#fef9c3", text: "#854d0e", border: "#fef08a" },
+};
+
+function carrierStyle(carrier) {
+  const c = Object.entries(CARRIER_COLORS).find(([k]) => carrier.includes(k));
+  return c ? c[1] : { bg: "var(--gray-100)", text: "var(--gray-700)", border: "var(--gray-200)" };
 }
 
-function formatDuration(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h > 0 ? `${h}h${m.toString().padStart(2, "0")}` : `${m} min`;
-}
-
-function buildBookingUrl(journey) {
+function buildBookingUrl(carrier) {
   if (!lastSearch) return "https://www.sncf-connect.com";
-  // Deep-link attempt to SNCF Connect (best effort)
   const from = encodeURIComponent(lastSearch.from.name);
   const to = encodeURIComponent(lastSearch.to.name);
-  const date = lastSearch.date.replace(/-/g, "");
-  return `https://www.sncf-connect.com/app/home/search?originLabel=${from}&destinationLabel=${to}&outwardDate=${date}&passengers=1`;
+  if (carrier && carrier.includes("OUIGO")) {
+    return `https://www.ouigo.com`;
+  }
+  return `https://www.sncf-connect.com/app/home/search?originLabel=${from}&destinationLabel=${to}&passengers=1`;
 }
 
-function renderResults(journeys, cached) {
+function renderResults(fares, cached) {
   const el = document.getElementById("results-list");
   const titleEl = document.getElementById("results-title");
   const cacheBadge = document.getElementById("results-cache-badge");
@@ -207,55 +194,31 @@ function renderResults(journeys, cached) {
   }
   cacheBadge.classList.toggle("hidden", !cached);
 
-  if (!journeys.length) {
-    el.innerHTML = `<div class="empty-state"><span>🚫</span><p>Aucun trajet trouvé pour cette date.<br/>Essayez une autre date ou des gares différentes.</p></div>`;
+  if (!fares || !fares.length) {
+    el.innerHTML = `<div class="empty-state"><span>🚫</span><p>Aucune offre trouvée pour ce trajet.<br/>Essayez des noms de gares différents.</p></div>`;
     resultsEl.classList.remove("hidden");
     document.getElementById("alert-cta").classList.add("hidden");
     return;
   }
 
-  el.innerHTML = journeys.map((j, i) => {
-    const depTime = formatTime(j.departure);
-    const arrTime = formatTime(j.arrival);
-    const dur = formatDuration(j.duration_min);
-    const trainLabels = j.sections.map(s => s.line || s.physical_mode).filter(Boolean);
-    const uniqueLabels = [...new Set(trainLabels)].slice(0, 2);
-    const bookUrl = buildBookingUrl(j);
-
-    const priceBlock = j.fare_found && j.price !== null
-      ? `<div class="price-amount">${j.price.toFixed(0)} €</div>
-         <span class="price-from">à partir de</span>`
-      : `<div class="price-unknown">Prix non disponible</div>`;
-
-    const transfersBlock = j.transfers > 0
-      ? `<span class="transfers-badge">${j.transfers} correspondance${j.transfers > 1 ? "s" : ""}</span>`
-      : `<span style="font-size:.75rem;color:var(--green);font-weight:600;">Direct</span>`;
+  el.innerHTML = fares.map((f) => {
+    const style = carrierStyle(f.carrier);
+    const bookUrl = buildBookingUrl(f.carrier);
 
     return `
-      <div class="journey-card">
-        <div class="journey-times">
-          <div class="time-block">
-            <div class="time">${depTime}</div>
-            <div class="station">${j.sections[0]?.from || lastSearch?.from?.name || ""}</div>
-          </div>
-          <div class="journey-line">
-            <div class="journey-duration">${dur}</div>
-            <div class="journey-track"></div>
-            <div class="journey-meta">
-              ${uniqueLabels.map(l => `<span class="train-label">${l}</span>`).join("")}
-              ${transfersBlock}
-            </div>
-          </div>
-          <div class="time-block">
-            <div class="time">${arrTime}</div>
-            <div class="station">${j.sections[j.sections.length-1]?.to || lastSearch?.to?.name || ""}</div>
-          </div>
+      <div class="journey-card fare-card">
+        <div class="fare-carrier" style="background:${style.bg};color:${style.text};border-color:${style.border}">
+          ${f.carrier}
         </div>
-
-        <div></div>
-
+        <div class="fare-route">
+          <span class="fare-station">${f.from}</span>
+          <span class="fare-arrow">→</span>
+          <span class="fare-station">${f.to}</span>
+          <span class="fare-class-badge">${f.class}</span>
+        </div>
         <div class="journey-price">
-          ${priceBlock}
+          <div class="price-amount">${f.min_price} €</div>
+          <span class="price-from">à partir de · jusqu'à ${f.max_price} €</span>
           <a class="book-btn" href="${bookUrl}" target="_blank" rel="noopener">Réserver →</a>
         </div>
       </div>
@@ -270,7 +233,7 @@ function renderResults(journeys, cached) {
 function openAlertModal() {
   if (!lastSearch) return;
   const label = document.getElementById("modal-route-label");
-  label.textContent = `${lastSearch.from.name} → ${lastSearch.to.name} · ${lastSearch.date}`;
+  label.textContent = `${lastSearch.from.name} → ${lastSearch.to.name}`;
   document.getElementById("alert-modal").classList.remove("hidden");
 }
 
@@ -296,7 +259,6 @@ async function saveAlert() {
         from_id: lastSearch.from.id,
         to_station: lastSearch.to.name,
         to_id: lastSearch.to.id,
-        travel_date: lastSearch.date,
         max_price: maxPrice,
         email,
       }),
@@ -394,7 +356,7 @@ function renderTrending(routes) {
     <div class="trending-card" onclick="prefillSearch('${r.from_station}', '${r.to_station}')">
       <div class="trending-route">${r.from_station} → ${r.to_station}</div>
       <div class="trending-searches">${r.searches} recherche${r.searches > 1 ? "s" : ""} cette semaine</div>
-      ${r.avg_price ? `<div class="trending-price">À partir de ~${Math.round(r.avg_price)} €</div>` : ""}
+      ${r.best_price ? `<div class="trending-price">À partir de ~${Math.round(r.best_price)} €</div>` : ""}
     </div>
   `).join("");
 }
@@ -423,18 +385,9 @@ function showToast(msg) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (function init() {
-  // Default date to tomorrow
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const yyyy = tomorrow.getFullYear();
-  const mm = String(tomorrow.getMonth() + 1).padStart(2, "0");
-  const dd = String(tomorrow.getDate()).padStart(2, "0");
-  document.getElementById("input-date").value = `${yyyy}-${mm}-${dd}`;
-
-  // Set default active tab nav button
   document.getElementById("nav-search").classList.add("active");
 
-  // Enter key triggers search
+  // Enter key on station inputs triggers search
   document.querySelectorAll(".search-field input").forEach(inp => {
     inp.addEventListener("keydown", e => {
       if (e.key === "Enter") doSearch();
