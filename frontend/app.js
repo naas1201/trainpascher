@@ -14,6 +14,7 @@ let selectedFrom = null; // { id, name, label }
 let selectedTo = null;
 let lastSearch = null;   // cache of latest search params for alert modal
 let autocompleteTimers = {};
+const suggestionCache = { from: [], to: [] }; // stores last results by field
 let userId = localStorage.getItem("tp_user_id");
 if (!userId) {
   userId = crypto.randomUUID();
@@ -32,16 +33,18 @@ function showTab(name) {
 }
 
 // ── Autocomplete ─────────────────────────────────────────────────────────────
-function autocomplete(field) {
+function onStationInput(field) {
   clearTimeout(autocompleteTimers[field]);
   const input = document.getElementById(`input-${field}`);
   const suggestionsEl = document.getElementById(`suggestions-${field}`);
   const q = input.value.trim();
 
+  // Clear selection when user types again
+  if (field === "from") selectedFrom = null;
+  else selectedTo = null;
+
   if (q.length < 2) {
     suggestionsEl.classList.add("hidden");
-    if (field === "from") selectedFrom = null;
-    else selectedTo = null;
     return;
   }
 
@@ -60,8 +63,11 @@ function renderSuggestions(field, places) {
   const el = document.getElementById(`suggestions-${field}`);
   if (!places.length) { el.classList.add("hidden"); return; }
 
-  el.innerHTML = places.map(p => `
-    <div class="suggestion-item" onclick="selectStation('${field}', ${JSON.stringify(p).replace(/"/g, "&quot;")})">
+  // Store results in cache so onclick can look up by index (no inline JSON)
+  suggestionCache[field] = places;
+
+  el.innerHTML = places.map((p, i) => `
+    <div class="suggestion-item" onclick="selectStation('${field}', ${i})">
       <div class="station-name">${p.name}</div>
       <div class="station-label">${p.label}</div>
     </div>
@@ -69,7 +75,9 @@ function renderSuggestions(field, places) {
   el.classList.remove("hidden");
 }
 
-function selectStation(field, place) {
+function selectStation(field, index) {
+  const place = suggestionCache[field][index];
+  if (!place) return;
   document.getElementById(`input-${field}`).value = place.name;
   document.getElementById(`suggestions-${field}`).classList.add("hidden");
   if (field === "from") selectedFrom = place;
