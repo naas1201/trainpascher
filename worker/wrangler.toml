@@ -1,0 +1,17 @@
+name = "trainpascher-worker"
+main = "src/index.js"
+compatibility_date = "2025-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CORS_ORIGIN = "https://trainpascher.pages.dev"
+
+# Secrets (set via: wrangler secret put <NAME>)
+# SNCF_API_KEY
+# TURSO_URL
+# TURSO_AUTH_TOKEN
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "db4758f45185481aada614d6826dd207"
+preview_id = "8d813e12b58b464aba7bd8b9feedc5bc"
