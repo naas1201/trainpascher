@@ -1,50 +1,41 @@
 /**
  * TrainPascher — Frontend SPA
- * Talks to the Cloudflare Worker API
  */
 
-// ── Config ──────────────────────────────────────────────────────────────────
-// Replace with your deployed worker URL, or use localhost for dev
 const API = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
   ? "http://localhost:8787"
   : "https://trainpascher-worker.qmpro.workers.dev";
 
-// ── State ────────────────────────────────────────────────────────────────────
-let selectedFrom = null; // { id, name, label }
+// ── State ─────────────────────────────────────────────────────────────────────
+let selectedFrom = null;
 let selectedTo = null;
-let lastSearch = null;   // cache of latest search params for alert modal
+let lastSearch = null;
 let autocompleteTimers = {};
-const suggestionCache = { from: [], to: [] }; // stores last results by field
-let userId = localStorage.getItem("tp_user_id");
-if (!userId) {
-  userId = crypto.randomUUID();
-  localStorage.setItem("tp_user_id", userId);
-}
+const suggestionCache = { from: [], to: [] };
 
-// ── Tabs ─────────────────────────────────────────────────────────────────────
+let userId = localStorage.getItem("tp_user_id");
+if (!userId) { userId = crypto.randomUUID(); localStorage.setItem("tp_user_id", userId); }
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
 function showTab(name) {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
   document.getElementById(`tab-${name}`).classList.add("active");
   document.getElementById(`nav-${name}`).classList.add("active");
-
   if (name === "alerts") loadAlerts();
   if (name === "trending") loadTrending();
 }
 
-// ── Autocomplete ─────────────────────────────────────────────────────────────
+// ── Autocomplete ──────────────────────────────────────────────────────────────
 function onStationInput(field) {
   clearTimeout(autocompleteTimers[field]);
   const input = document.getElementById(`input-${field}`);
-  const suggestionsEl = document.getElementById(`suggestions-${field}`);
   const q = input.value.trim();
-
-  // Clear selection when user types again
   if (field === "from") selectedFrom = null;
   else selectedTo = null;
 
   if (q.length < 2) {
-    suggestionsEl.classList.add("hidden");
+    document.getElementById(`suggestions-${field}`).classList.add("hidden");
     return;
   }
 
@@ -54,7 +45,7 @@ function onStationInput(field) {
       const places = await res.json();
       renderSuggestions(field, places);
     } catch (_) {
-      suggestionsEl.classList.add("hidden");
+      document.getElementById(`suggestions-${field}`).classList.add("hidden");
     }
   }, 280);
 }
@@ -62,10 +53,7 @@ function onStationInput(field) {
 function renderSuggestions(field, places) {
   const el = document.getElementById(`suggestions-${field}`);
   if (!places.length) { el.classList.add("hidden"); return; }
-
-  // Store results in cache so onclick can look up by index (no inline JSON)
   suggestionCache[field] = places;
-
   el.innerHTML = places.map((p, i) => `
     <div class="suggestion-item" onclick="selectStation('${field}', ${i})">
       <div class="station-name">${p.name}</div>
@@ -85,75 +73,53 @@ function selectStation(field, index) {
 }
 
 function swapStations() {
-  const fromInput = document.getElementById("input-from");
-  const toInput = document.getElementById("input-to");
-  const tmpVal = fromInput.value;
-  fromInput.value = toInput.value;
-  toInput.value = tmpVal;
-  const tmpSel = selectedFrom;
-  selectedFrom = selectedTo;
-  selectedTo = tmpSel;
+  const fi = document.getElementById("input-from");
+  const ti = document.getElementById("input-to");
+  [fi.value, ti.value] = [ti.value, fi.value];
+  [selectedFrom, selectedTo] = [selectedTo, selectedFrom];
 }
 
-// Close suggestions on outside click
 document.addEventListener("click", (e) => {
-  if (!e.target.closest(".autocomplete-wrap")) {
+  if (!e.target.closest(".autocomplete-wrap"))
     document.querySelectorAll(".suggestions").forEach(s => s.classList.add("hidden"));
-  }
 });
 
 // ── Search ────────────────────────────────────────────────────────────────────
 async function doSearch() {
   const errorEl = document.getElementById("error-section");
   const resultsEl = document.getElementById("results-section");
-
   errorEl.classList.add("hidden");
   resultsEl.classList.add("hidden");
 
-  if (!selectedFrom) {
-    showError("Veuillez sélectionner une gare de départ dans la liste.");
-    return;
-  }
-  if (!selectedTo) {
-    showError("Veuillez sélectionner une gare d'arrivée dans la liste.");
-    return;
-  }
+  if (!selectedFrom) { showError("Veuillez sélectionner une gare de départ dans la liste."); return; }
+  if (!selectedTo)   { showError("Veuillez sélectionner une gare d'arrivée dans la liste."); return; }
 
+  const date = document.getElementById("input-date").value;
   setSearchLoading(true);
 
   try {
     const res = await fetch(`${API}/api/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from_name: selectedFrom.name,
-        to_name: selectedTo.name,
-      }),
+      body: JSON.stringify({ from_name: selectedFrom.name, to_name: selectedTo.name, date }),
     });
-
     const data = await res.json();
 
-    if (!res.ok) {
-      showError(data.error || "Erreur lors de la recherche.");
-      return;
-    }
+    if (!res.ok) { showError(data.error || "Erreur lors de la recherche."); return; }
 
-    lastSearch = { from: selectedFrom, to: selectedTo };
-    renderResults(data.fares, data.cached);
-  } catch (err) {
+    lastSearch = { from: selectedFrom, to: selectedTo, date };
+    renderResults(data);
+  } catch (_) {
     showError("Impossible de contacter le serveur. Vérifiez votre connexion.");
   } finally {
     setSearchLoading(false);
   }
 }
 
-function setSearchLoading(loading) {
-  const btn = document.querySelector(".search-btn");
-  const text = document.getElementById("search-btn-text");
-  const spinner = document.getElementById("search-spinner");
-  btn.disabled = loading;
-  text.textContent = loading ? "Recherche…" : "Rechercher";
-  spinner.classList.toggle("hidden", !loading);
+function setSearchLoading(v) {
+  document.querySelector(".search-btn").disabled = v;
+  document.getElementById("search-btn-text").textContent = v ? "Recherche…" : "Rechercher";
+  document.getElementById("search-spinner").classList.toggle("hidden", !v);
 }
 
 function showError(msg) {
@@ -162,78 +128,161 @@ function showError(msg) {
   el.classList.remove("hidden");
 }
 
-const CARRIER_COLORS = {
-  "OUIGO": { bg: "#fce7f3", text: "#be185d", border: "#fbcfe8" },
-  "TGV INOUI": { bg: "#e0f2fe", text: "#0369a1", border: "#bae6fd" },
-  "INTERCITES": { bg: "#fef9c3", text: "#854d0e", border: "#fef08a" },
+// ── Results rendering ─────────────────────────────────────────────────────────
+
+const CARRIER_STYLE = {
+  "OUIGO":                { bg: "#fce7f3", text: "#9d174d", border: "#f9a8d4", dot: "#ec4899" },
+  "OUIGO TRAIN CLASSIQUE":{ bg: "#fce7f3", text: "#9d174d", border: "#f9a8d4", dot: "#ec4899" },
+  "TGV INOUI":            { bg: "#eff6ff", text: "#1d4ed8", border: "#bfdbfe", dot: "#3b82f6" },
 };
 
 function carrierStyle(carrier) {
-  const c = Object.entries(CARRIER_COLORS).find(([k]) => carrier.includes(k));
-  return c ? c[1] : { bg: "var(--gray-100)", text: "var(--gray-700)", border: "var(--gray-200)" };
+  return CARRIER_STYLE[carrier] || { bg: "var(--gray-100)", text: "var(--gray-700)", border: "var(--gray-200)", dot: "#6b7280" };
 }
 
-function buildBookingUrl(carrier) {
-  if (!lastSearch) return "https://www.sncf-connect.com";
-  const from = encodeURIComponent(lastSearch.from.name);
-  const to = encodeURIComponent(lastSearch.to.name);
-  if (carrier && carrier.includes("OUIGO")) {
-    return `https://www.ouigo.com`;
-  }
-  return `https://www.sncf-connect.com/app/home/search?originLabel=${from}&destinationLabel=${to}&passengers=1`;
-}
-
-function renderResults(fares, cached) {
+function renderResults(data) {
   const el = document.getElementById("results-list");
   const titleEl = document.getElementById("results-title");
   const cacheBadge = document.getElementById("results-cache-badge");
   const resultsEl = document.getElementById("results-section");
+  const alertCta = document.getElementById("alert-cta");
 
-  if (lastSearch) {
-    titleEl.textContent = `${lastSearch.from.name} → ${lastSearch.to.name}`;
-  }
-  cacheBadge.classList.toggle("hidden", !cached);
+  titleEl.textContent = `${lastSearch.from.name} → ${lastSearch.to.name}`;
+  cacheBadge.classList.toggle("hidden", !data.cached);
+  resultsEl.classList.remove("hidden");
 
-  if (!fares || !fares.length) {
-    el.innerHTML = `<div class="empty-state"><span>🚫</span><p>Aucune offre trouvée pour ce trajet.<br/>Essayez des noms de gares différents.</p></div>`;
-    resultsEl.classList.remove("hidden");
-    document.getElementById("alert-cta").classList.add("hidden");
+  // ── TER route (no TGV/OUIGO service) ──────────────────────────────────────
+  if (data.type === "ter_route") {
+    const fromHasTgv = data.from_has_tgv;
+    const toHasTgv   = data.to_has_tgv;
+
+    // Build a smart hint
+    let hint = "";
+    if (!fromHasTgv && !toHasTgv) {
+      hint = `Ni <strong>${lastSearch.from.name}</strong> ni <strong>${lastSearch.to.name}</strong> ne sont desservies par TGV ou OUIGO. Ce trajet est assuré par <strong>TER</strong> (train régional).`;
+    } else if (!fromHasTgv) {
+      hint = `<strong>${lastSearch.from.name}</strong> n'est pas desservie par TGV/OUIGO. Ce trajet est assuré par <strong>TER</strong>.`;
+    } else if (!toHasTgv) {
+      hint = `<strong>${lastSearch.to.name}</strong> n'est pas desservie par TGV/OUIGO. Ce trajet est assuré par <strong>TER</strong>.`;
+    } else {
+      hint = `Pas de liaison directe TGV/OUIGO entre ces gares. Le trajet se fait probablement en <strong>TER</strong> ou avec correspondance.`;
+    }
+
+    const dateParam = lastSearch.date ? lastSearch.date.replace(/-/g, "") : "";
+    const connectUrl = data.booking_url;
+
+    el.innerHTML = `
+      <div class="ter-card">
+        <div class="ter-icon">🚆</div>
+        <div class="ter-body">
+          <div class="ter-title">Trajet TER</div>
+          <p class="ter-hint">${hint}</p>
+          <div class="ter-actions">
+            <a class="ter-book-btn primary" href="${connectUrl}" target="_blank" rel="noopener">
+              Voir les prix &amp; horaires sur SNCF Connect →
+            </a>
+            <a class="ter-book-btn secondary" href="https://www.ter.sncf.com" target="_blank" rel="noopener">
+              Site TER SNCF →
+            </a>
+          </div>
+          <div class="ter-tip">
+            💡 <strong>Astuce TrainPascher :</strong> Les prix TER sont souvent fixes. Cherchez une carte <em>Avantage</em> ou <em>Liberté</em> si vous voyagez régulièrement — économies jusqu'à 50 %.
+          </div>
+        </div>
+      </div>
+    `;
+    alertCta.classList.add("hidden");
     return;
   }
 
-  el.innerHTML = fares.map((f) => {
-    const style = carrierStyle(f.carrier);
-    const bookUrl = buildBookingUrl(f.carrier);
+  // ── TGV / OUIGO fares ─────────────────────────────────────────────────────
+  if (!data.fares || !data.fares.length) {
+    el.innerHTML = `<div class="empty-state"><span>🚫</span><p>Aucune offre trouvée.<br/>Essayez des noms de gares différents.</p></div>`;
+    alertCta.classList.add("hidden");
+    return;
+  }
+
+  // Group fares by carrier for the comparison header
+  const byCarrier = {};
+  data.fares.forEach(f => {
+    if (!byCarrier[f.carrier]) byCarrier[f.carrier] = [];
+    byCarrier[f.carrier].push(f);
+  });
+  const carriers = Object.keys(byCarrier);
+
+  // Summary bar
+  const summaryHtml = carriers.map(c => {
+    const st = carrierStyle(c);
+    const best = byCarrier[c].reduce((a, b) => a.min_price < b.min_price ? a : b);
+    return `<div class="summary-chip" style="background:${st.bg};color:${st.text};border-color:${st.border}">
+      <span class="summary-carrier">${c}</span>
+      <span class="summary-price">à partir de <strong>${best.min_price} €</strong></span>
+    </div>`;
+  }).join("");
+
+  // Fare cards
+  const faresHtml = data.fares.map(f => {
+    const st = carrierStyle(f.carrier);
+    const bookUrl = f.carrier.includes("OUIGO") ? data.ouigo_url : data.booking_url;
+
+    const profilesHtml = f.profiles.map(p => {
+      // Shorten profile name
+      const shortName = p.name
+        .replace("Tarif ", "")
+        .replace("Élève - Étudiant - Apprenti", "Étudiant/Élève")
+        .replace("Elève - Etudiant - Apprenti", "Étudiant/Élève")
+        .replace("Réglementé", "Réglementé");
+      const isNormal = p.name === "Tarif Normal";
+      return `<div class="profile-row ${isNormal ? 'profile-normal' : ''}">
+        <span class="profile-name">${shortName}</span>
+        <span class="profile-price">${p.min} € <span class="profile-max">→ ${p.max} €</span></span>
+      </div>`;
+    }).join("");
 
     return `
-      <div class="journey-card fare-card">
-        <div class="fare-carrier" style="background:${style.bg};color:${style.text};border-color:${style.border}">
-          ${f.carrier}
+      <div class="fare-card">
+        <div class="fare-header">
+          <div class="fare-carrier-badge" style="background:${st.bg};color:${st.text};border-color:${st.border}">
+            <span class="carrier-dot" style="background:${st.dot}"></span>
+            ${f.carrier}
+          </div>
+          <div class="fare-route-label">
+            <span class="fare-station-name">${f.from}</span>
+            <span class="fare-arrow-sm">→</span>
+            <span class="fare-station-name">${f.to}</span>
+          </div>
+          <div class="fare-class-badge">${f.class}</div>
         </div>
-        <div class="fare-route">
-          <span class="fare-station">${f.from}</span>
-          <span class="fare-arrow">→</span>
-          <span class="fare-station">${f.to}</span>
-          <span class="fare-class-badge">${f.class}</span>
+        <div class="fare-profiles">
+          ${profilesHtml}
         </div>
-        <div class="journey-price">
-          <div class="price-amount">${f.min_price} €</div>
-          <span class="price-from">à partir de · jusqu'à ${f.max_price} €</span>
+        <div class="fare-footer">
+          <div class="fare-best-price">
+            <span class="price-label">Prix plancher</span>
+            <span class="price-big">${f.min_price} €</span>
+          </div>
           <a class="book-btn" href="${bookUrl}" target="_blank" rel="noopener">Réserver →</a>
         </div>
       </div>
     `;
   }).join("");
 
-  resultsEl.classList.remove("hidden");
-  document.getElementById("alert-cta").classList.remove("hidden");
+  el.innerHTML = `
+    <div class="summary-bar">${summaryHtml}</div>
+    <div class="fare-info-note">
+      Prix de référence issus des données ouvertes SNCF. Le prix final dépend de la disponibilité lors de la réservation.
+    </div>
+    ${faresHtml}
+  `;
+
+  alertCta.classList.remove("hidden");
 }
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 function openAlertModal() {
   if (!lastSearch) return;
-  const label = document.getElementById("modal-route-label");
-  label.textContent = `${lastSearch.from.name} → ${lastSearch.to.name}`;
+  document.getElementById("modal-route-label").textContent =
+    `${lastSearch.from.name} → ${lastSearch.to.name}`;
   document.getElementById("alert-modal").classList.remove("hidden");
 }
 
@@ -245,10 +294,8 @@ function closeAlertModal() {
 
 async function saveAlert() {
   if (!lastSearch) return;
-
   const maxPrice = parseFloat(document.getElementById("alert-max-price").value) || null;
-  const email = document.getElementById("alert-email").value.trim() || null;
-
+  const email    = document.getElementById("alert-email").value.trim() || null;
   try {
     const res = await fetch(`${API}/api/alerts`, {
       method: "POST",
@@ -263,27 +310,22 @@ async function saveAlert() {
         email,
       }),
     });
-
     if (res.ok) {
       closeAlertModal();
       showToast("✅ Alerte créée !");
-      // Reload alerts list if tab visible
-      if (document.getElementById("tab-alerts").classList.contains("active")) {
-        loadAlerts();
-      }
+      if (document.getElementById("tab-alerts").classList.contains("active")) loadAlerts();
     } else {
       const err = await res.json();
       alert("Erreur : " + (err.error || "Inconnue"));
     }
   } catch (_) {
-    alert("Impossible de créer l'alerte. Vérifiez votre connexion.");
+    alert("Impossible de créer l'alerte.");
   }
 }
 
 async function loadAlerts() {
   const el = document.getElementById("alerts-list");
   el.innerHTML = `<div class="loading-state">Chargement…</div>`;
-
   try {
     const res = await fetch(`${API}/api/alerts?user_id=${userId}`);
     const data = await res.json();
@@ -295,21 +337,14 @@ async function loadAlerts() {
 
 function renderAlerts(alerts) {
   const el = document.getElementById("alerts-list");
-
   if (!alerts.length) {
-    el.innerHTML = `
-      <div class="empty-state">
-        <span>🔔</span>
-        <p>Aucune alerte pour l'instant.<br/>Faites une recherche et créez votre première alerte !</p>
-      </div>`;
+    el.innerHTML = `<div class="empty-state"><span>🔔</span><p>Aucune alerte.<br/>Faites une recherche et créez-en une !</p></div>`;
     return;
   }
-
   el.innerHTML = alerts.map(a => `
     <div class="alert-item" id="alert-${a.id}">
       <div style="flex:1">
         <div class="alert-route">${a.from_station} → ${a.to_station}</div>
-        <div class="alert-date">📅 ${a.travel_date}</div>
       </div>
       ${a.max_price ? `<span class="alert-threshold">Seuil : ${a.max_price} €</span>` : ""}
       <button class="alert-delete-btn" onclick="deleteAlert('${a.id}')">Supprimer</button>
@@ -321,37 +356,29 @@ async function deleteAlert(id) {
   try {
     await fetch(`${API}/api/alerts?id=${id}&user_id=${userId}`, { method: "DELETE" });
     document.getElementById(`alert-${id}`)?.remove();
-    // Check if list is now empty
-    if (!document.querySelector(".alert-item")) {
-      renderAlerts([]);
-    }
-  } catch (_) {
-    alert("Impossible de supprimer l'alerte.");
-  }
+    if (!document.querySelector(".alert-item")) renderAlerts([]);
+  } catch (_) { alert("Impossible de supprimer l'alerte."); }
 }
 
 // ── Trending ──────────────────────────────────────────────────────────────────
 async function loadTrending() {
   const el = document.getElementById("trending-list");
   el.innerHTML = `<div class="loading-state">Chargement…</div>`;
-
   try {
-    const res = await fetch(`${API}/api/trending`);
+    const res  = await fetch(`${API}/api/trending`);
     const data = await res.json();
     renderTrending(data);
   } catch (_) {
-    el.innerHTML = `<div class="loading-state">Impossible de charger les tendances.</div>`;
+    el.innerHTML = `<div class="loading-state">Impossible de charger.</div>`;
   }
 }
 
 function renderTrending(routes) {
   const el = document.getElementById("trending-list");
-
   if (!routes.length) {
-    el.innerHTML = `<div class="empty-state"><p>Pas encore de données de tendances.<br/>Revenez après quelques recherches !</p></div>`;
+    el.innerHTML = `<div class="empty-state"><p>Pas encore de données.<br/>Revenez après quelques recherches !</p></div>`;
     return;
   }
-
   el.innerHTML = routes.map(r => `
     <div class="trending-card" onclick="prefillSearch('${r.from_station}', '${r.to_station}')">
       <div class="trending-route">${r.from_station} → ${r.to_station}</div>
@@ -375,9 +402,8 @@ function showToast(msg) {
     position: "fixed", bottom: "1.5rem", right: "1.5rem",
     background: "#111827", color: "white",
     padding: ".7rem 1.2rem", borderRadius: "8px",
-    fontWeight: "600", fontSize: ".9rem",
-    zIndex: "1000", boxShadow: "0 4px 24px rgba(0,0,0,.15)",
-    animation: "fadeIn .2s ease",
+    fontWeight: "600", fontSize: ".9rem", zIndex: "1000",
+    boxShadow: "0 4px 24px rgba(0,0,0,.15)",
   });
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3000);
@@ -385,12 +411,13 @@ function showToast(msg) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (function init() {
-  document.getElementById("nav-search").classList.add("active");
+  // Default date = tomorrow
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  document.getElementById("input-date").value =
+    `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
-  // Enter key on station inputs triggers search
-  document.querySelectorAll(".search-field input").forEach(inp => {
-    inp.addEventListener("keydown", e => {
-      if (e.key === "Enter") doSearch();
-    });
-  });
+  document.querySelectorAll(".search-field input").forEach(inp =>
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); })
+  );
 })();
