@@ -136,7 +136,7 @@ async function navitiaPlaces(q, key) {
   });
 }
 
-async function navitiaJourneys(fromId, toId, date, key, count = 5) {
+async function navitiaJourneys(fromId, toId, date, key, count = 20) {
   const datetime = toNavDt(date);
   const url =
     `${NAVITIA_BASE}/journeys` +
@@ -316,6 +316,9 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
             is_tgv:    isTgv,
             fares,
             ter_estimate,
+            // Keep raw datetime strings for connection calculation
+            _dep_dt: s.departure_date_time,
+            _arr_dt: s.arrival_date_time,
           };
         });
 
@@ -332,6 +335,28 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
           hasEstimate = true;
         }
       }
+
+      // ── Connection time calculation ────────────────────────────────────
+      const rawPtSections = (j.sections || []).filter(s => s.type === "public_transport");
+      const connections = [];
+      for (let i = 0; i < rawPtSections.length - 1; i++) {
+        const arrStr = rawPtSections[i].arrival_date_time;
+        const depStr = rawPtSections[i + 1].departure_date_time;
+        if (arrStr && depStr) {
+          const navToMs = dt => new Date(
+            `${dt.slice(0,4)}-${dt.slice(4,6)}-${dt.slice(6,8)}T${dt.slice(9,11)}:${dt.slice(11,13)}:${dt.slice(13,15)}Z`
+          ).getTime();
+          const connMin = Math.round((navToMs(depStr) - navToMs(arrStr)) / 60000);
+          connections.push({
+            at: sections[i + 1]?.from.replace(/\s*\([^)]*\)$/, '') || "",
+            dur_min: Math.max(0, connMin),
+            risk: connMin < 10 ? 'high' : connMin < 20 ? 'medium' : 'low',
+          });
+        }
+      }
+      const connection_risk = connections.length === 0 ? null :
+        connections.some(c => c.risk === 'high') ? 'high' :
+        connections.some(c => c.risk === 'medium') ? 'medium' : 'low';
 
       // Booking URL deep-link
       const fromLabel = sections[0]?.from || dep.date;
@@ -351,6 +376,9 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
         dur_min,
         transfers: j.nb_transfers || 0,
         sections,
+        connections,
+        connection_risk,
+        tags: [],
         total_min_price: totalMinPrice !== null ? Math.round(totalMinPrice * 10) / 10 : null,
         price_is_estimate: hasEstimate,
         booking_url: bookUrl,
@@ -360,6 +388,27 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
       if (a.dep_date !== b.dep_date) return a.dep_date < b.dep_date ? -1 : 1;
       return a.dep_time < b.dep_time ? -1 : 1;
     });
+}
+
+// ── Tag journeys ──────────────────────────────────────────────────────────
+function tagJourneys(journeys) {
+  if (!journeys.length) return;
+  const minDur = Math.min(...journeys.map(j => j.dur_min));
+  const priced = journeys.filter(j => j.total_min_price !== null);
+  const minPrice = priced.length ? Math.min(...priced.map(j => j.total_min_price)) : null;
+
+  journeys.forEach(j => {
+    if (j.dur_min === minDur) j.tags.push('fastest');
+    if (minPrice !== null && j.total_min_price === minPrice) j.tags.push('cheapest');
+  });
+
+  const direct = journeys.filter(j => j.transfers === 0);
+  const safe = journeys.filter(j => j.connection_risk !== 'high');
+  const candidates = direct.length > 0 ? direct : safe;
+  if (candidates.length > 0) {
+    const best = candidates.reduce((a, b) => a.dur_min < b.dur_min ? a : b);
+    best.tags.unshift('recommended');
+  }
 }
 
 // ── Turnstile ─────────────────────────────────────────────────────────────
@@ -412,7 +461,7 @@ async function handleSearch(req, env, origin) {
   if (!tsValid) return json({ error: "Vérification de sécurité échouée." }, 403, origin);
 
   // KV cache key (card-type-independent — all profiles returned)
-  const cacheKey = `v6:${from_id}:${to_id}:${date}`;
+  const cacheKey = `v7:${from_id}:${to_id}:${date}`;
   const cached = await env.CACHE.get(cacheKey, "json");
   if (cached) return json({ ...cached, cached: true }, 200, origin);
 
@@ -455,15 +504,18 @@ async function handleSearch(req, env, origin) {
   // ── 3. Parse journeys into UI-ready structure ────────────────────────
   const journeys = parseJourneys(navJourneys, odsFaresBySegment);
 
-  // ── 4. Main route ODS fares (for display even with no Navitia) ───────
+  // ── 4. Tag journeys ──────────────────────────────────────────────────
+  tagJourneys(journeys);
+
+  // ── 5. Main route ODS fares (for display even with no Navitia) ───────
   const mainFares = odsFaresBySegment[`${fromCityMain.toLowerCase()}:${toCityMain.toLowerCase()}`] || [];
 
-  // ── 5. Determine overall min price ───────────────────────────────────
+  // ── 6. Determine overall min price ───────────────────────────────────
   const overallMin = journeys.length
     ? journeys.reduce((m, j) => j.total_min_price !== null ? Math.min(m, j.total_min_price) : m, Infinity)
     : (mainFares.length ? mainFares[0].min_price : null);
 
-  // ── 6. Booking URL ────────────────────────────────────────────────────
+  // ── 7. Booking URL ────────────────────────────────────────────────────
   const dateStr = date.replace(/-/g, "");
   const bookingUrl =
     `https://www.sncf-connect.com/app/home/search` +
