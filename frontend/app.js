@@ -8,10 +8,9 @@ const API = (window.location.hostname === "localhost" || window.location.hostnam
 
 // ── Card config ───────────────────────────────────────────────────────────
 const CARDS = {
-  none:       { label: "Sans carte",             profile: "Tarif Normal",                        color: "#374151" },
-  avantage:   { label: "Carte Avantage",          profile: "Tarif Avantage",                      color: "#1d4ed8" },
-  etudiant:   { label: "Étudiant / Apprenti",     profile: "Tarif Elève - Etudiant - Apprenti",   color: "#059669" },
-  reglemente: { label: "Tarif réduit max",        profile: "Tarif Réglementé",                    color: "#7c3aed" },
+  none:     { label: "Sans carte",          color: "#374151" },
+  avantage: { label: "Carte Avantage",      color: "#1d4ed8" },
+  etudiant: { label: "Étudiant / Apprenti", color: "#059669" },
 };
 
 // Short display names for profiles
@@ -354,18 +353,31 @@ function renderProfileRows(fares, compact = false) {
   if (!fares || !fares.length) return "";
   return fares.map(f => {
     const st = carrierStyle(f.carrier);
-    const profilesHtml = (f.profiles || []).map(p => {
-      const short = PROFILE_SHORT[p.name] || p.name.replace("Tarif ", "");
-      const cardKey = Object.entries(CARDS).find(([, v]) => v.profile === p.name)?.[0] || "none";
-      return `<div class="profile-row" data-card-key="${cardKey}">
-        <span class="profile-name">${short}</span>
-        <span class="profile-range">${p.min} € <span class="profile-max">— ${p.max} €</span></span>
-      </div>`;
-    }).join("");
+
+    // OUIGO note: no reduction cards
+    const ouigoNote = f.ouigo_no_discount
+      ? `<div class="ouigo-no-discount">ℹ OUIGO n'applique pas les cartes de réduction — prix déjà optimisé</div>`
+      : "";
+
+    const profilesHtml = (f.profiles || [])
+      // Only show profiles relevant to the current card selector (none/avantage/etudiant)
+      .filter(p => ["none","avantage","etudiant"].includes(p.card_key))
+      .map(p => {
+        const short = PROFILE_SHORT[p.name] || p.name.replace("Tarif ", "");
+        const estBadge = p.estimated
+          ? `<span class="est-badge" title="Estimation basée sur les remises SNCF publiées (−30% Avantage, −25% Étudiant). Confirmez sur SNCF Connect.">~estimé</span>`
+          : "";
+        return `<div class="profile-row" data-card-key="${p.card_key}">
+          <span class="profile-name">${short}${estBadge}</span>
+          <span class="profile-range">${p.min} € <span class="profile-max">— ${p.max} €</span></span>
+        </div>`;
+      }).join("");
+
     return `<div class="fare-group ${compact ? 'fare-group--compact' : ''}">
       <div class="fare-carrier-tag" style="background:${st.bg};color:${st.text};border:1px solid ${st.border}">
         ${f.carrier} · ${f.class}
       </div>
+      ${ouigoNote}
       <div class="fare-profiles-list">${profilesHtml}</div>
     </div>`;
   }).join("");
@@ -373,11 +385,21 @@ function renderProfileRows(fares, compact = false) {
 
 // ── Highlight active card in all fare tables ──────────────────────────────
 function highlightActiveCard() {
-  const profile = CARDS[selectedCard]?.profile || CARDS.none.profile;
   document.querySelectorAll(".profile-row").forEach(row => {
-    const rowKey = row.dataset.cardKey;
-    const isMatch = rowKey === selectedCard || (selectedCard === "none" && rowKey === "none");
+    const isMatch = row.dataset.cardKey === selectedCard;
     row.classList.toggle("profile-highlighted", isMatch);
+    // Show/hide the "✓ Votre tarif" badge
+    let badge = row.querySelector(".your-fare-badge");
+    if (isMatch) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "your-fare-badge";
+        badge.textContent = "✓ votre tarif";
+        row.querySelector(".profile-name")?.appendChild(badge);
+      }
+    } else {
+      badge?.remove();
+    }
   });
 }
 

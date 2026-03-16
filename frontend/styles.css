@@ -132,10 +132,13 @@ main{flex:1;max-width:900px;width:100%;margin:0 auto;padding:2rem 1.25rem}
 .profile-max{color:var(--gray-400);font-weight:400;font-size:.8rem}
 
 /* Highlighted card row */
-.profile-highlighted{background:var(--blue-lt) !important}
+.profile-highlighted{background:var(--blue-lt) !important;border-left:3px solid var(--blue)}
 .profile-highlighted .profile-name{color:var(--blue);font-weight:700}
-.profile-highlighted .profile-range{color:var(--blue)}
+.profile-highlighted .profile-range{color:var(--blue);font-size:.95rem}
 .profile-highlighted .profile-max{color:#93c5fd}
+.your-fare-badge{font-size:.68rem;background:var(--blue);color:#fff;border-radius:10px;padding:.1rem .4rem;margin-left:.4rem;vertical-align:middle;font-weight:700}
+.est-badge{font-size:.68rem;background:#fdf4ff;color:#7e22ce;border:1px solid #e9d5ff;border-radius:10px;padding:.1rem .35rem;margin-left:.3rem;cursor:help}
+.ouigo-no-discount{font-size:.78rem;color:#92400e;background:var(--amber-lt);border-top:1px solid var(--amber-mid);padding:.4rem .75rem;font-style:italic}
 
 /* ── Fare-only card ───────────────────────────────────────────── */
 .fare-only-card .fare-only-header{display:flex;align-items:flex-start;gap:.75rem;padding:1rem 1.25rem}

@@ -157,7 +157,7 @@ async function navitiaJourneys(fromId, toId, date, key, count = 5) {
 }
 
 // ── ODS fare lookup ───────────────────────────────────────────────────────
-async function odsFares(fromCity, toCity, odsKey) {
+async function odsFaresQuery(fromCity, toCity, odsKey) {
   const f = safeOdsKeyword(fromCity);
   const t = safeOdsKeyword(toCity);
   const url =
@@ -172,6 +172,21 @@ async function odsFares(fromCity, toCity, odsKey) {
   return data.results || [];
 }
 
+// TGV INOUI fares are symmetric (same price both ways).
+// If the forward direction has no TGV INOUI, try reverse and swap names.
+async function odsFares(fromCity, toCity, odsKey) {
+  const forward = await odsFaresQuery(fromCity, toCity, odsKey);
+  const hasTgv = forward.some(r => !OUIGO_CARRIERS.has(r.transporteur) && r.transporteur !== "INTERCITES");
+  if (hasTgv) return forward;
+
+  const reverse = await odsFaresQuery(toCity, fromCity, odsKey);
+  const tgvFromReverse = reverse
+    .filter(r => !OUIGO_CARRIERS.has(r.transporteur))
+    .map(r => ({ ...r, gare_origine: r.gare_destination, gare_destination: r.gare_origine }));
+
+  return [...forward, ...tgvFromReverse];
+}
+
 const PROFILE_ORDER = [
   "Tarif Normal",
   "Tarif Avantage",
@@ -179,6 +194,8 @@ const PROFILE_ORDER = [
   "Tarif Elève - Etudiant - Apprenti",
   "Tarif Élève - Étudiant - Apprenti",
 ];
+
+const OUIGO_CARRIERS = new Set(["OUIGO", "OUIGO TRAIN CLASSIQUE"]);
 
 function groupFares(records) {
   const grouped = {};
@@ -203,13 +220,51 @@ function groupFares(records) {
       name: r.profil_tarifaire,
       min: r.prix_minimum,
       max: r.prix_maximum,
+      estimated: false,
     });
   }
+
   return Object.values(grouped).map(g => {
     g.profiles.sort((a, b) => {
       const ai = PROFILE_ORDER.indexOf(a.name); const bi = PROFILE_ORDER.indexOf(b.name);
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
     });
+
+    // For TGV INOUI: if ODS only has Tarif Normal (common for Paris departures),
+    // add estimated Avantage (−30%) and Étudiant (−25%) — SNCF published rates.
+    const isOuigo   = OUIGO_CARRIERS.has(g.carrier);
+    const hasNormal = g.profiles.some(p => p.card_key === "none");
+    const hasAvantage = g.profiles.some(p => p.card_key === "avantage");
+    const hasEtudiant = g.profiles.some(p => p.card_key === "etudiant");
+
+    if (!isOuigo && hasNormal && !hasAvantage) {
+      const n = g.profiles.find(p => p.card_key === "none");
+      g.profiles.push({
+        card_key: "avantage",
+        name: "Tarif Avantage",
+        min: Math.round(n.min * 0.70 * 10) / 10,
+        max: Math.round(n.max * 0.70 * 10) / 10,
+        estimated: true,
+      });
+    }
+    if (!isOuigo && hasNormal && !hasEtudiant) {
+      const n = g.profiles.find(p => p.card_key === "none");
+      g.profiles.push({
+        card_key: "etudiant",
+        name: "Tarif Elève - Etudiant - Apprenti",
+        min: Math.round(n.min * 0.75 * 10) / 10,
+        max: Math.round(n.max * 0.75 * 10) / 10,
+        estimated: true,
+      });
+    }
+
+    // OUIGO flag for frontend
+    g.ouigo_no_discount = isOuigo;
+
+    // Re-sort after potential additions
+    const ORDER = ["none", "avantage", "etudiant", "reglemente"];
+    g.profiles.sort((a, b) => ORDER.indexOf(a.card_key) - ORDER.indexOf(b.card_key));
+
     return g;
   }).sort((a, b) => a.min_price - b.min_price);
 }
@@ -357,7 +412,7 @@ async function handleSearch(req, env, origin) {
   if (!tsValid) return json({ error: "Vérification de sécurité échouée." }, 403, origin);
 
   // KV cache key (card-type-independent — all profiles returned)
-  const cacheKey = `v5:${from_id}:${to_id}:${date}`;
+  const cacheKey = `v6:${from_id}:${to_id}:${date}`;
   const cached = await env.CACHE.get(cacheKey, "json");
   if (cached) return json({ ...cached, cached: true }, 200, origin);
 
