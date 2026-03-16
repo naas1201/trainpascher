@@ -96,6 +96,9 @@ main{flex:1;max-width:900px;width:100%;margin:0 auto;padding:2rem 1.25rem}
 .price-chip{margin-left:auto;background:var(--green-lt);color:var(--green);border:1px solid #bbf7d0;border-radius:8px;padding:.3rem .8rem;font-size:.88rem;white-space:nowrap;flex-shrink:0}
 .price-chip strong{font-size:1.1rem}
 .price-chip--ter{background:var(--amber-lt);color:#92400e;border-color:var(--amber-mid)}
+.price-chip--estimate{background:#fdf4ff;color:#7e22ce;border-color:#e9d5ff}
+.price-chip-hint{font-size:.75rem;opacity:.7;cursor:help;margin-left:.2rem}
+.ter-est-badge{font-size:.72rem;background:#fdf4ff;color:#7e22ce;border:1px solid #e9d5ff;border-radius:10px;padding:.1rem .4rem;margin-left:.4rem;cursor:help;white-space:nowrap}
 
 .journey-carriers{display:flex;align-items:center;gap:.3rem;padding:0 1.25rem .75rem;flex-wrap:wrap}
 .section-pill{display:inline-flex;align-items:center;border:1px solid;border-radius:5px;padding:.15rem .55rem;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}

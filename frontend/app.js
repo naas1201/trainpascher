@@ -256,7 +256,13 @@ function renderJourneyCard(j) {
             </div>
           </div>`;
         } else if (!s.is_tgv) {
-          fareLine = `<div class="section-fare ter-fare">Prix TER — variable selon la date</div>`;
+          const est = s.ter_estimate;
+          fareLine = est
+            ? `<div class="section-fare ter-fare">
+                TER · ~${est.price_min}€ – ${est.price_max}€
+                <span class="ter-est-badge" title="Estimation basée sur ${est.km_rail} km. Prix exact sur SNCF Connect.">estimation ℹ</span>
+               </div>`
+            : `<div class="section-fare ter-fare">TER · prix variable</div>`;
         }
         return `<div class="section-row">
           <div class="section-header">
@@ -278,13 +284,22 @@ function renderJourneyCard(j) {
       ${renderProfileRows(j.sections[0].fares)}
     </div>`;
   } else if (j.sections.length === 1 && (!j.sections[0].fares || !j.sections[0].fares.length)) {
-    globalFaresHtml = `<div class="journey-fares ter-fare-block">
-      <span>🚆 Trajet TER — Prix variable, consultez SNCF Connect</span>
-    </div>`;
+    const est = j.sections[0]?.ter_estimate;
+    globalFaresHtml = est
+      ? `<div class="journey-fares ter-fare-block">
+          🚆 TER · Tarif estimé : <strong>~${est.price_min} – ${est.price_max} €</strong>
+          <span class="ter-est-badge" title="Basé sur ${est.km_r}km — confirmation sur SNCF Connect.">estimation ℹ</span>
+         </div>`
+      : `<div class="journey-fares ter-fare-block">
+          🚆 TER — Prix variable, voir sur SNCF Connect
+         </div>`;
   }
 
   const priceChip = j.total_min_price !== null
-    ? `<span class="price-chip">à partir de <strong>${j.total_min_price} €</strong></span>`
+    ? `<span class="price-chip ${j.price_is_estimate ? 'price-chip--estimate' : ''}">
+        ${j.price_is_estimate ? '~' : 'à partir de'} <strong>${j.total_min_price} €</strong>
+        ${j.price_is_estimate ? '<span class="price-chip-hint" title="Estimation TER basée sur la distance (±20%). Prix exact sur SNCF Connect.">ℹ</span>' : ''}
+       </span>`
     : `<span class="price-chip price-chip--ter">Prix TER</span>`;
 
   return `

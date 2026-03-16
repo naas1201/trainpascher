@@ -15,6 +15,36 @@ const TURNSTILE_URL  = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 // Navitia commercial modes that are in the ODS tarifs dataset
 const TGV_MODES = new Set(["TGV INOUI", "OUIGO", "OUIGO TRAIN CLASSIQUE", "INOUI"]);
 
+// ── TER price estimation (Haversine + rail factor) ────────────────────────
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// French TER average: base €2 + €0.13/km (rail ≈ straight-line × 1.3)
+// Returns { km_rail, price_min, price_max }
+function estimateTerFare(lat1, lon1, lat2, lon2) {
+  const straightKm = haversineKm(
+    parseFloat(lat1), parseFloat(lon1),
+    parseFloat(lat2), parseFloat(lon2)
+  );
+  const railKm  = Math.round(straightKm * 1.30);
+  const base    = 2.0;
+  const perKm   = 0.13;
+  const price   = base + railKm * perKm;
+  // ±20% band to reflect regional variation
+  return {
+    km_rail:   railKm,
+    price_min: Math.round(price * 0.8 * 10) / 10,
+    price_max: Math.round(price * 1.2 * 10) / 10,
+    price_mid: Math.round(price * 10) / 10,
+  };
+}
+
 // Map card type → ODS profile name
 const CARD_PROFILE = {
   none:        "Tarif Normal",
@@ -91,16 +121,17 @@ async function navitiaPlaces(q, key) {
   if (!res.ok) throw new Error(`Navitia places ${res.status}`);
   const data = await res.json();
   return (data.places || []).map(p => {
-    // name format: "StationName (City)" or just "StationName"
     const raw = p.name || p.stop_area?.name || "";
     const cleanName = raw.replace(/\s*\([^)]*\)\s*$/, "").trim() || raw;
     const city = cityFromNavitiaName(raw);
+    const coord = p.stop_area?.coord || {};
     return {
-      id: p.id,                       // "stop_area:SNCF:87491803"
-      name: cleanName,                // "Royan"
-      navitia_name: raw,              // "Royan (Royan)" — used for ODS city extraction
-      city,                           // "Royan"
+      id:   p.id,
+      name: cleanName,
+      city,
       label: cleanName,
+      lat:  coord.lat  || null,
+      lon:  coord.lon  || null,
     };
   });
 }
@@ -202,31 +233,50 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
           const toCity   = cityFromNavitiaName(toName);
           const sdep = parseNavDt(s.departure_date_time);
           const sarr = parseNavDt(s.arrival_date_time);
-          const sDurMin = Math.round(((s.duration || 0)) / 60);
+          const sDurMin = Math.round((s.duration || 0) / 60);
           const isTgv = TGV_MODES.has(mode);
           const segKey = `${fromCity.toLowerCase()}:${toCity.toLowerCase()}`;
           const fares = isTgv ? (odsFaresBySegment[segKey] || []) : [];
 
+          // TER price estimate using stop coordinates from Navitia
+          let ter_estimate = null;
+          if (!isTgv) {
+            const fc = s.from?.stop_point?.coord;
+            const tc = s.to?.stop_point?.coord;
+            if (fc?.lat && fc?.lon && tc?.lat && tc?.lon) {
+              ter_estimate = estimateTerFare(fc.lat, fc.lon, tc.lat, tc.lon);
+            }
+          }
+
           return {
-            from: fromName.replace(/\s*\([^)]*\)$/, ""),
-            to:   toName.replace(/\s*\([^)]*\)$/, ""),
+            from:      fromName.replace(/\s*\([^)]*\)$/, ""),
+            to:        toName.replace(/\s*\([^)]*\)$/, ""),
             from_city: fromCity,
-            to_city: toCity,
-            dep: sdep.time,
-            arr: sarr.time,
-            dur_min: sDurMin,
-            carrier: mode,
-            headsign: s.display_informations?.headsign || "",
-            is_tgv: isTgv,
-            fares,                          // ODS fares for this leg
+            to_city:   toCity,
+            dep:       sdep.time,
+            arr:       sarr.time,
+            dur_min:   sDurMin,
+            carrier:   mode,
+            headsign:  s.display_informations?.headsign || "",
+            is_tgv:    isTgv,
+            fares,
+            ter_estimate,
           };
         });
 
-      // Best fare = min across all TGV sections, if any
-      const tgvFares = sections.flatMap(s => s.fares);
-      const totalMinPrice = tgvFares.length
-        ? tgvFares.reduce((m, f) => Math.min(m, f.min_price), Infinity)
-        : null;
+      // Total min price = sum of each section's cheapest known fare
+      // TGV/OUIGO: use ODS min_price   |   TER: use estimate
+      let totalMinPrice = null;
+      let hasEstimate = false;
+      for (const s of sections) {
+        if (s.is_tgv && s.fares.length) {
+          const legMin = s.fares.reduce((m, f) => Math.min(m, f.min_price), Infinity);
+          totalMinPrice = (totalMinPrice ?? 0) + legMin;
+        } else if (!s.is_tgv && s.ter_estimate) {
+          totalMinPrice = (totalMinPrice ?? 0) + s.ter_estimate.price_min;
+          hasEstimate = true;
+        }
+      }
 
       // Booking URL deep-link
       const fromLabel = sections[0]?.from || dep.date;
@@ -246,7 +296,8 @@ function parseJourneys(navJourneys, odsFaresBySegment) {
         dur_min,
         transfers: j.nb_transfers || 0,
         sections,
-        total_min_price: totalMinPrice,
+        total_min_price: totalMinPrice !== null ? Math.round(totalMinPrice * 10) / 10 : null,
+        price_is_estimate: hasEstimate,
         booking_url: bookUrl,
       };
     })
@@ -306,7 +357,7 @@ async function handleSearch(req, env, origin) {
   if (!tsValid) return json({ error: "Vérification de sécurité échouée." }, 403, origin);
 
   // KV cache key (card-type-independent — all profiles returned)
-  const cacheKey = `v4:${from_id}:${to_id}:${date}`;
+  const cacheKey = `v5:${from_id}:${to_id}:${date}`;
   const cached = await env.CACHE.get(cacheKey, "json");
   if (cached) return json({ ...cached, cached: true }, 200, origin);
 
